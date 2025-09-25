@@ -1,0 +1,185 @@
+import os
+import time
+import numpy as np
+import pandas as pd
+from datetime import datetime, timedelta
+from polygon import RESTClient, WebSocketClient
+
+# ==============================
+# CONFIG
+# ==============================
+API_KEY = "YOUR_POLYGON_KEY"
+INITIAL_CASH = 1000
+PREMIUM_RANGE = (2.0, 3.0)
+STOP_LOSS = -0.20  # -20%
+TRIM_LEVELS = [0.25, 0.50, 1.00]  # +25%, +50%, +100%
+
+BROKER_CONNECTED = False  # Change this when linking real broker API
+
+# Polygon client
+rest_client = RESTClient(API_KEY)
+
+# ==============================
+# UTILITIES
+# ==============================
+def get_trading_date():
+    """Return last valid trading day (adjust for weekends/holidays)."""
+    today = datetime.today()
+    # Weekend adjustment
+    if today.weekday() == 5:  # Saturday
+        today -= timedelta(days=1)
+    elif today.weekday() == 6:  # Sunday
+        today -= timedelta(days=2)
+    # Holiday adjustment (Polygon has calendar API, stub for now)
+    # TODO: replace with polygon.market_holidays()
+    return today.strftime("%Y-%m-%d")
+
+def calculate_metrics(trade_log, initial_cash, final_cash):
+    pnl = final_cash - initial_cash
+    ret = pnl / initial_cash
+    if trade_log.empty:
+        return pnl, ret, 0
+    daily_returns = trade_log["return"]
+    sharpe = np.mean(daily_returns) / np.std(daily_returns) * np.sqrt(252) if np.std(daily_returns) > 0 else 0
+    return pnl, ret, sharpe
+
+# ==============================
+# BACKTESTING FUNCTIONS
+# ==============================
+def fetch_options_chain(date, expiration):
+    """Mocked — In production, fetch option chain from Polygon API."""
+    data = {
+        "ticker": [f"SPX{expiration}C5000", f"SPX{expiration}P5000"],
+        "premium": [2.3, 2.8]
+    }
+    return pd.DataFrame(data)
+
+def fetch_option_trades(symbol, date):
+    """Mocked — In production, fetch historical tick/trade data."""
+    np.random.seed(42)
+    prices = np.random.normal(2.5, 0.2, 200)  # simulate option price
+    df = pd.DataFrame({
+        "timestamp": pd.date_range(start=date + " 09:30", periods=len(prices), freq="1min"),
+        "price": np.maximum(prices, 0.5)
+    })
+    return df
+
+def backtest_scalping(df, cash):
+    """Simulate trades based on scalping rules."""
+    trades = []
+    low = df["price"].min()
+    entry_price = low
+    contracts = int(cash // (entry_price * 100))
+    if contracts == 0:
+        return pd.DataFrame(), cash
+
+    # Enter position
+    position_value = contracts * entry_price * 100
+    cash -= position_value
+    stop = entry_price * (1 + STOP_LOSS)
+
+    for trim, level in zip([0.25,0.25,0.25], TRIM_LEVELS):  # 25% chunks
+        target = entry_price * (1 + level)
+        trades.append({"entry": entry_price, "exit": target, "return": level})
+
+    # Runner exit at stop loss
+    trades.append({"entry": entry_price, "exit": stop, "return": STOP_LOSS})
+
+    # Update cash (simplified)
+    cash += contracts * entry_price * 100 * (1 + np.mean([t["return"] for t in trades]))
+
+    return pd.DataFrame(trades), cash
+
+def run_backtest():
+    date = get_trading_date()
+    expiration = date.replace("-", "")  # Simplified expiration handling
+    chain = fetch_options_chain(date, expiration)
+
+    master_log = pd.DataFrame()
+    cash = INITIAL_CASH
+
+    for _, row in chain.iterrows():
+        if PREMIUM_RANGE[0] <= row["premium"] <= PREMIUM_RANGE[1]:
+            df = fetch_option_trades(row["ticker"], date)
+            trades, cash = backtest_scalping(df, cash)
+            if not trades.empty:
+                trades["symbol"] = row["ticker"]
+                master_log = pd.concat([master_log, trades])
+
+    pnl, ret, sharpe = calculate_metrics(master_log, INITIAL_CASH, cash)
+    print("\n===== Backtest Results =====")
+    print(f"Final Cash: ${cash:.2f}")
+    print(f"Total PnL: ${pnl:.2f}")
+    print(f"Return: {ret*100:.2f}%")
+    print(f"Sharpe Ratio: {sharpe:.2f}")
+
+# ==============================
+# LIVE EXECUTION (MOCK TRADING)
+# ==============================
+class MockBroker:
+    def __init__(self, starting_cash=1000):
+        self.cash = starting_cash
+        self.positions = {}
+
+    def buy(self, symbol, price, qty):
+        cost = price * 100 * qty
+        if cost > self.cash:
+            print("Not enough cash!")
+            return False
+        self.cash -= cost
+        self.positions[symbol] = {"entry": price, "qty": qty}
+        print(f"[BUY] {qty} {symbol} @ {price} | Cash left: {self.cash:.2f}")
+        return True
+
+    def sell(self, symbol, price, qty):
+        if symbol not in self.positions:
+            return False
+        entry = self.positions[symbol]["entry"]
+        pnl = (price - entry) * 100 * qty
+        self.cash += price * 100 * qty
+        print(f"[SELL] {qty} {symbol} @ {price} | PnL: {pnl:.2f} | Cash: {self.cash:.2f}")
+        return True
+
+def run_live_execution():
+    broker = MockBroker(INITIAL_CASH)
+    symbol = "SPX_TEST"
+    price = 2.5
+
+    # Entry
+    broker.buy(symbol, price, 4)
+
+    # Trimming exits
+    broker.sell(symbol, price*1.25, 1)  # +25%
+    broker.sell(symbol, price*1.50, 1)  # +50%
+    broker.sell(symbol, price*2.00, 1)  # +100%
+
+    # Runner with stop loss
+    broker.sell(symbol, price*0.80, 1)  # -20% stop
+
+# ==============================
+# BROKER CONNECTION PLACEHOLDER
+# ==============================
+def connect_broker():
+    """Placeholder for real broker connection."""
+    if BROKER_CONNECTED:
+        # Example: IBKR / Tradier / TastyTrade API
+        print("Connecting to broker...")
+        # broker = ib_insync.IB() or TradierClient(API_KEY)
+        # broker.connect(...)
+    else:
+        print("Broker connection skipped (mock mode).")
+
+# ==============================
+# MAIN
+# ==============================
+if __name__ == "__main__":
+    mode = input("Choose mode: [backtest/live]: ").strip().lower()
+
+    connect_broker()
+
+    if mode == "backtest":
+        run_backtest()
+    elif mode == "live":
+        run_live_execution()
+    else:
+        print("Invalid mode")
